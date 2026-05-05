@@ -24,6 +24,28 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 
 // Get buzzer
 static const struct pwm_dt_spec buzzer = PWM_DT_SPEC_GET(DT_ALIAS(buzzer));
+// button definitions
+static const struct gpio_dt_spec buttons[] = {
+    GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
+    GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
+    GPIO_DT_SPEC_GET(DT_ALIAS(sw2), gpios),
+    GPIO_DT_SPEC_GET(DT_ALIAS(sw3), gpios),
+};
+
+// Combo State
+static const int secret_combo[] = {0, 1, 2, 3}; // Button indices for the combo
+static volatile int combo_step = 0;
+
+
+// Helper function to detect which button is currently pressed
+int get_pressed_button(void) {
+    for (int i = 0; i < ARRAY_SIZE(buttons); i++) {
+        if (gpio_pin_get_dt(&buttons[i]) == 1) {
+            return i; 
+        }
+    }
+    return -1; // No button pressed
+}
 
 volatile bool isKeyPresent = false;
 volatile bool isUnlocked = false;
@@ -385,6 +407,35 @@ BT_CONN_CB_DEFINE(conn_cb) = {
 	.le_cs_subevent_data_available = subevent_result_cb,
 };
 
+void button_monitor_fn(void *arg1, void *arg2, void *arg3)
+{
+    while (1) {
+        if (isKeyPresent && !isUnlocked) {
+            int pressed = get_pressed_button();
+            if (pressed != -1) {
+                if (pressed == secret_combo[combo_step]) {
+                    combo_step++;
+                    printk("Correct! Step %d/4\n", combo_step);
+                    k_msleep(350); 
+                } else {
+                    combo_step = 0;
+                    printk("Wrong button! Resetting.\n");
+                    k_msleep(350);
+                }
+
+                if (combo_step == 4) {
+                    isUnlocked = true;
+                    printk("Unlocked\n");
+                    k_sem_give(&sem_unlock_tone);
+                }
+            }
+        }
+        k_msleep(50);
+    }
+}
+
+K_THREAD_DEFINE(button_tid, 1024, button_monitor_fn, NULL, NULL, NULL, 5, 0, 0);
+
 int main(void)
 {
 	int err;
@@ -405,6 +456,14 @@ int main(void)
 	// Set LED0 off
 	gpio_pin_set_dt(&led, 0);
 
+	// Init Buttons
+    for (int i = 0; i < ARRAY_SIZE(buttons); i++) {
+        if (!gpio_is_ready_dt(&buttons[i])) {
+            printk("Error: Button %d not ready\n", i);
+            return 0;
+        }
+        gpio_pin_configure_dt(&buttons[i], GPIO_INPUT);
+    }
 	/* Init buzzer */
 	if (!pwm_is_ready_dt(&buzzer)) {
 		printk("Error: Buzzer PWM device is not ready\n");
@@ -558,17 +617,19 @@ int main(void)
 					isKeyPresent = true;
 					// Turn on LED
 					gpio_pin_set_dt(&led, 1);
+					combo_step = 0; // Reset combo step on key detection
 				}
-
-
+				
 				// Todo: Add button combo detection to this logic
-				if (!isUnlocked) {
-					isUnlocked = true;
-					printk("Unlocked\n");
+				// if (!isUnlocked) {
+				// 	isUnlocked = true;
+				// 	printk("Unlocked\n");
+					
+				// 	// Play unlock tone
+				// 	k_sem_give(&sem_unlock_tone);
+				// }
 
-					// Play unlock tone
-					k_sem_give(&sem_unlock_tone);
-				}
+
 			} else if (isKeyPresent) {
 				printk("Key removed\n");
 				isKeyPresent = false;
@@ -577,10 +638,13 @@ int main(void)
 				gpio_pin_set_dt(&led, 0);
 
 				// Play lock tone
-				k_sem_give(&sem_lock_tone);
+				if (isUnlocked) {
+					isUnlocked = false;
+					k_sem_give(&sem_lock_tone);
+					printk("Locked\n");
+				}
 
-				isUnlocked = false;
-				printk("Locked\n");
+				combo_step = 0; // Reset combo step on key removal
 			}
 		}
 	}
