@@ -1,0 +1,22 @@
+{
+    "version": 2,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20
+    },
+    "configurePresets": [
+        {
+            "name": "build",
+            "displayName": "Build for BL54L15 DVK nRF54l15 Application Non Secure",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "BOARD": "bl54l15_dvk/nrf54l15/cpuapp/ns",
+                "CONF_FILE": "prj.conf",
+                "DEBUG_THREAD_INFO": true,
+                "CONFIG_DEBUG_THREAD_INFO": true,
+                "key_DEBUG_THREAD_INFO": true
+            }
+        }
+    ]
+}
