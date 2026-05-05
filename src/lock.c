@@ -26,18 +26,70 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct pwm_dt_spec buzzer = PWM_DT_SPEC_GET(DT_ALIAS(buzzer));
 
 volatile bool isKeyPresent = false;
+volatile bool isUnlocked = false;
 
-static void unlock()
+struct note {
+    uint32_t period_ns;
+    uint32_t duration_ms;
+};
+
+static const struct note unlock_sound[] = {
+    {PWM_HZ(440), 100}, // A4
+    {PWM_HZ(554), 100}, // C#5
+    {PWM_HZ(659), 200}, // E5
+    {0, 0}              // End marker
+};
+
+static const struct note lock_sound[] = {
+    {PWM_HZ(659), 100}, // E5
+    {PWM_HZ(554), 100}, // C#5
+    {PWM_HZ(440), 200}, // A4
+    {0, 0}              // End marker
+};
+
+K_SEM_DEFINE(sem_unlock_tone, 0, 1);
+K_SEM_DEFINE(sem_lock_tone, 0, 1);
+
+void unlock_sound_fn()
 {
-	setBuzzer(PWM_USEC(800), PWM_USEC(400));
-	gpio_pin_set_dt(&led, 1);
+    while (1) {
+        k_sem_take(&sem_unlock_tone, K_FOREVER);
+
+        for (int i = 0; unlock_sound[i].duration_ms > 0; i++) {
+			// 50% duty cycle - pulse is half the period
+            setBuzzer(unlock_sound[i].period_ns, unlock_sound[i].period_ns / 2);
+            
+			// Sleep duration ms
+            k_msleep(unlock_sound[i].duration_ms);
+            
+			// Brief silence between notes
+            setBuzzer(0, 0);
+            k_msleep(20);
+        }
+    }
 }
 
-static void lock()
+void lock_sound_fn()
 {
-	setBuzzer(0, 0);
-	gpio_pin_set_dt(&led, 0);
+    while (1) {
+        k_sem_take(&sem_lock_tone, K_FOREVER);
+
+        for (int i = 0; lock_sound[i].duration_ms > 0; i++) {
+			// 50% duty cycle - pulse is half the period
+            setBuzzer(lock_sound[i].period_ns, lock_sound[i].period_ns / 2);
+            
+			// Sleep duration ms
+            k_msleep(lock_sound[i].duration_ms);
+            
+			// Brief silence between notes
+            setBuzzer(0, 0);
+            k_msleep(20);
+        }
+    }
 }
+
+K_THREAD_DEFINE(unlock_sound_tid, 1024, unlock_sound_fn, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(lock_sound_tid, 1024, lock_sound_fn, NULL, NULL, NULL, 7, 0, 0);
 
 void setBuzzer(uint32_t period_ns, uint32_t pulse_ns)
 {
@@ -389,6 +441,20 @@ int main(void)
 		.max_tx_power = BT_HCI_OP_LE_CS_MAX_MAX_TX_POWER,
 	};
 
+	struct bt_le_conn_param fast_params = {
+		.interval_min = 6, // 7.5 ms
+		.interval_max = 12, // 15 ms
+		.latency = 0,
+		.timeout = 400,
+	};
+
+	err = bt_conn_le_param_update(connection, &fast_params);
+	if (err) {
+		printk("Failed to request fast connection parameters (err %d)\n", err);
+	} else {
+		printk("Fast connection parameters requested.\n");
+	}
+
 	err = bt_le_cs_set_default_settings(connection, &default_settings);
 	if (err) {
 		printk("Failed to configure default CS settings (err %d)\n", err);
@@ -484,16 +550,37 @@ int main(void)
 			printk("Distance estimation failed.\n");
 			continue;
 		} else {
-			printk("Estimated distance: %f meters\n", (double)distance);
+			printk("Distance: %f meters\n", (double)distance);
 
-			if (distance < 2.0f) {
-				printk("Key present\n");
-				isKeyPresent = true;
-				unlock();
+			if (distance < 1.0f) {
+				if (!isKeyPresent) {
+					printk("Key present\n");
+					isKeyPresent = true;
+					// Turn on LED
+					gpio_pin_set_dt(&led, 1);
+				}
+
+
+				// Todo: Add button combo detection to this logic
+				if (!isUnlocked) {
+					isUnlocked = true;
+					printk("Unlocked\n");
+
+					// Play unlock tone
+					k_sem_give(&sem_unlock_tone);
+				}
 			} else if (isKeyPresent) {
 				printk("Key removed\n");
 				isKeyPresent = false;
-				lock();
+
+				// Turn off LED
+				gpio_pin_set_dt(&led, 0);
+
+				// Play lock tone
+				k_sem_give(&sem_lock_tone);
+
+				isUnlocked = false;
+				printk("Locked\n");
 			}
 		}
 	}
